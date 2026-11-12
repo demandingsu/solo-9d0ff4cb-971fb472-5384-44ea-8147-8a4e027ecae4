@@ -5,20 +5,36 @@
     python3 -m http.server 8001 --directory demo_site
 
 数据特意构造为：
-- 列表页按发布时间倒序排列（更正公告排在其引用的原公告之前），
+- 列表页按发布时间实际时刻倒序排列（更正公告排在其引用的原公告之前），
   服务端不能依赖页面顺序来判断截止时间；
+- 时间字段混用无时区的北京时间（"2026-11-03 11:20"）与带偏移的 ISO 时间
+  （"2026-11-03T03:20:00+00:00"），甚至出现“字符串排序靠后、实际时刻更早”
+  的更正公告，服务端必须按实际时刻比较；
 - 每个项目的“生效截止时间”由发布时间最新的那份公告（原公告或更正公告）决定；
 - 含已过期与未过期两种项目。
 """
 from __future__ import annotations
 
 import html
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PAGE_SIZE = 4
 OUT_DIR = Path(__file__).resolve().parent.parent / "demo_site"
+
+_BEIJING = timezone(timedelta(hours=8))
+
+
+def _instant(text: str) -> datetime:
+    """列表排序用：无时区值按北京时间，带偏移值按实际时刻。"""
+    t = text.strip()
+    if t.endswith(("Z", "z")):
+        t = t[:-1] + "+00:00"
+    dt = datetime.fromisoformat(t)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_BEIJING)
+    return dt
 
 
 @dataclass
@@ -27,8 +43,8 @@ class Announcement:
     title: str                     # 公告标题
     kind: str                      # original | correction
     project_name: str              # 项目名称
-    published_at: str              # 发布时间 YYYY-MM-DD HH:MM
-    deadline: str | None = None    # 投标截止时间（更正公告可为空）
+    published_at: str              # 发布时间（无时区=北京时间，或带偏移 ISO）
+    deadline: str | None = None    # 投标截止时间（更正公告可为空；格式同上混用）
     corrects_code: str | None = None  # 更正公告引用的原公告编号
     reason: str = ""               # 更正原因（仅更正公告）
 
@@ -38,10 +54,11 @@ class Announcement:
 
 
 # ---------------------------------------------------------------------------
-# 示例数据：5 个项目，其中 3 个含更正公告，共 10 条公告
+# 示例数据：6 个项目，其中 4 个含更正公告，共 12 条公告。
+# 时间字段刻意混用无时区北京时间与带偏移 ISO 时间（+08:00 / +00:00）。
 # ---------------------------------------------------------------------------
 ANNOUNCEMENTS: list[Announcement] = [
-    # 项目 A：原公告已过期，更正延期后仍在有效期内
+    # 项目 A：原公告已过期，更正（带 +08:00 偏移）延期后仍在有效期内
     Announcement(
         code="SZ-2026-001",
         title="滨河路市政改造工程施工招标公告",
@@ -55,12 +72,13 @@ ANNOUNCEMENTS: list[Announcement] = [
         title="滨河路市政改造工程施工招标更正公告（第一次）",
         kind="correction",
         project_name="滨河路市政改造工程",
-        published_at="2026-10-28 16:00",
-        deadline="2026-11-25 14:30",
+        published_at="2026-10-28T16:00:00+08:00",
+        deadline="2026-11-25T14:30:00+08:00",
         corrects_code="SZ-2026-001",
         reason="因招标文件图纸调整，投标截止时间顺延。",
     ),
-    # 项目 B：两次更正，最终截止时间以发布时间最新的第二次更正为准
+    # 项目 B：两次更正。G1 用带偏移写法、字符串排序靠后但实际时刻更早；
+    # 生效截止时间必须取实际最新的 G2（无时区北京时间），且 G2 截止时间带偏移
     Announcement(
         code="SZ-2026-002",
         title="城北污水处理厂扩建工程招标公告",
@@ -74,7 +92,7 @@ ANNOUNCEMENTS: list[Announcement] = [
         title="城北污水处理厂扩建工程招标更正公告",
         kind="correction",
         project_name="城北污水处理厂扩建工程",
-        published_at="2026-10-22 15:00",
+        published_at="2026-11-03T10:30:00+08:00",  # 实际 10:30，早于 G2 的 11:20
         deadline="2026-11-18 09:00",
         corrects_code="SZ-2026-002",
         reason="答疑澄清，截止时间调整。",
@@ -84,8 +102,8 @@ ANNOUNCEMENTS: list[Announcement] = [
         title="城北污水处理厂扩建工程招标更正公告（第二次）",
         kind="correction",
         project_name="城北污水处理厂扩建工程",
-        published_at="2026-11-03 11:20",
-        deadline="2026-11-30 10:00",
+        published_at="2026-11-03 11:20",  # 无时区北京时间，实际最晚
+        deadline="2026-11-30T10:00:00+08:00",
         corrects_code="SZ-2026-002",
         reason="再次延期，以本公告时间为准。",
     ),
@@ -98,7 +116,7 @@ ANNOUNCEMENTS: list[Announcement] = [
         published_at="2026-09-15 08:45",
         deadline="2026-10-30 17:00",
     ),
-    # 项目 D：更正公告不修改截止时间（deadline 为空），生效时间仍取原公告
+    # 项目 D：更正公告（带偏移）不修改截止时间，生效时间仍取原公告
     Announcement(
         code="SZ-2026-004",
         title="高新区雨污分流管网工程招标公告",
@@ -112,18 +130,19 @@ ANNOUNCEMENTS: list[Announcement] = [
         title="高新区雨污分流管网工程招标更正公告",
         kind="correction",
         project_name="高新区雨污分流管网工程",
-        published_at="2026-11-01 09:10",
+        published_at="2026-11-01T09:10:00+08:00",
         deadline=None,
         corrects_code="SZ-2026-004",
         reason="仅更正联系人电话，投标截止时间不变。",
     ),
-    # 项目 E：原公告在最后一个列表页、更正公告在第一页（跨页乱序）
+    # 项目 E：原公告在最后一个列表页、更正公告在第一页（跨页乱序）；
+    # 同一条公告内发布时间与截止时间也混用两种格式
     Announcement(
         code="SZ-2026-005",
         title="湖滨公园配套市政道路工程招标公告",
         kind="original",
         project_name="湖滨公园配套市政道路工程",
-        published_at="2026-10-08 13:00",
+        published_at="2026-10-08T13:00:00+08:00",
         deadline="2026-11-08 15:00",
     ),
     Announcement(
@@ -132,9 +151,29 @@ ANNOUNCEMENTS: list[Announcement] = [
         kind="correction",
         project_name="湖滨公园配套市政道路工程",
         published_at="2026-11-05 17:30",
-        deadline="2026-11-20 15:00",
+        deadline="2026-11-20T15:00:00+08:00",
         corrects_code="SZ-2026-005",
         reason="工程量清单调整，截止时间顺延。",
+    ),
+    # 项目 F：更正公告使用 UTC（+00:00）偏移写法 —— 2026-10-18T02:00:00+00:00
+    # 即北京时间 10:00，实际晚于原公告的北京时间 09:00，生效截止时间取更正公告
+    Announcement(
+        code="SZ-2026-006",
+        title="江滩排涝泵站改造工程招标公告",
+        kind="original",
+        project_name="江滩排涝泵站改造工程",
+        published_at="2026-10-18 09:00",
+        deadline="2026-11-16 18:00",
+    ),
+    Announcement(
+        code="SZ-2026-006-G1",
+        title="江滩排涝泵站改造工程招标更正公告",
+        kind="correction",
+        project_name="江滩排涝泵站改造工程",
+        published_at="2026-10-18T02:00:00+00:00",  # = 北京时间 2026-10-18 10:00
+        deadline="2026-11-13T10:00:00+00:00",       # = 北京时间 2026-11-13 18:00
+        corrects_code="SZ-2026-006",
+        reason="开标场地调整，投标截止时间相应提前。",
     ),
 ]
 
@@ -221,8 +260,8 @@ def _list_page(items: list[Announcement], page: int, total_pages: int) -> str:
 
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    # 列表按发布时间倒序 —— 更正公告天然排在原公告前面，制造页面顺序干扰
-    ordered = sorted(ANNOUNCEMENTS, key=lambda a: a.published_at, reverse=True)
+    # 列表按发布时间实际时刻倒序 —— 更正公告天然排在原公告前面，制造页面顺序干扰
+    ordered = sorted(ANNOUNCEMENTS, key=lambda a: _instant(a.published_at), reverse=True)
     total_pages = (len(ordered) + PAGE_SIZE - 1) // PAGE_SIZE
 
     for a in ordered:

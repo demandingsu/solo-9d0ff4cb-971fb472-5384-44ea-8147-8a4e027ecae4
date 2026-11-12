@@ -6,8 +6,7 @@ from datetime import datetime
 from . import database
 from .merge import EffectiveDeadline, MergeError, merge_projects
 from .scraper import CollectionError, collect
-
-TIME_FORMAT = "%Y-%m-%d %H:%M"
+from .times import TimeParseError, as_instant, now_instant, parse_instant
 
 
 class ServiceError(Exception):
@@ -15,18 +14,20 @@ class ServiceError(Exception):
 
 
 def _is_expired(deadline_text: str, now: datetime | None = None) -> bool:
-    try:
-        deadline = datetime.strptime(deadline_text, TIME_FORMAT)
-    except ValueError:
-        # 容错：支持带秒或 ISO 形式
-        deadline = datetime.fromisoformat(deadline_text)
-    return deadline <= (now or datetime.now())
+    """截止时间是否已过。
+
+    无时区值按北京时间解释，带偏移值按实际时刻比较；与服务器本地时区无关。
+    时间无法解释时抛 TimeParseError（采集流程中转为采集错误）。
+    """
+    deadline = parse_instant(deadline_text)
+    current = as_instant(now) if now is not None else now_instant()
+    return deadline <= current
 
 
 def _to_project(d: EffectiveDeadline, now: datetime | None = None) -> dict:
     return {
         "project_name": d.project_name,
-        "current_deadline": d.deadline,
+        "current_deadline": d.deadline,  # 公告原文时间文本
         "deadline_source_code": d.source_code,
         "deadline_source_url": d.source_url,
         "is_expired": _is_expired(d.deadline, now),
@@ -41,9 +42,9 @@ def run_collection(list_url: str) -> dict:
     started_at = database.utcnow_iso()
     try:
         raw = collect(list_url)
-        # 先在内存完成归并校验：数据有问题时不写库
+        # 先在内存完成归并校验（含全部时间字段解析）：数据有问题时不写库
         projects = build_projects(raw)
-    except (CollectionError, MergeError) as exc:
+    except (CollectionError, MergeError, TimeParseError) as exc:
         # 记录失败采集；announcements 表完全不动，保留上次成功结果
         with database.get_conn() as conn:
             database.record_run(
